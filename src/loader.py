@@ -32,8 +32,8 @@ class CarDataset(Dataset):
                  root_dir_dropmasks='../../data/pku-autonomous-driving/test_masks/{}.jpg', 
                  training=True, 
                  transform=None,
-                 img_w=1600,
-                 img_h=500):
+                 img_w=2048,
+                 img_h=512):
         
         self.df = dataframe
         self.root_dir = root_dir
@@ -91,8 +91,8 @@ class CarDataset(Dataset):
         
         return [img, mask, regr, mask_gaus, dropmask]
     
-def train_dev_test(PATH = '../../data/pku-autonomous-driving/', test_size = 0.1, 
-                   random_state=1105, remove_out_image=True):
+def train_dev_test(PATH = '../../data/pku-autonomous-driving/', test_size = 0.2, 
+                   random_state=47, remove_out_image=True):
     
     train, test = load_data(PATH)
     

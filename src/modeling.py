@@ -1,5 +1,4 @@
 #!pip install efficientnet-pytorch
-
 from efficientnet_pytorch import EfficientNet
 import torch
 import torch.nn as nn
@@ -70,11 +69,36 @@ def get_mesh(batch_size, shape_x, shape_y, device=torch.device("cuda")):
     mesh = torch.cat([torch.tensor(mg_x).to(device), torch.tensor(mg_y).to(device)], 1)
     return mesh
 
+def set_dropout(model, drop_rate):
+    # source: https://discuss.pytorch.org/t/how-to-increase-dropout-rate-during-training/58107/4
+    for name, child in model.named_children():
+        if isinstance(child, torch.nn.Dropout):
+            child.p = drop_rate
+            print("name:", name)
+            print("children:\n", child)
+
+
+def effnet_dropout(drop_rate, ver='b2'):
+    base_model0 = EfficientNet.from_pretrained(f"efficientnet-{ver}")
+    set_dropout(base_model0, drop_rate)
+    return base_model0
+
+
 class MyUNet(nn.Module):
     '''Mixture of previous classes'''
-    def __init__(self, n_classes, batch_size=8, img_w=1600, device=torch.device("cuda")):
+    
+    def __init__(self, n_classes, 
+                 dropout_rate=0.02, 
+                 batch_size=8, 
+                 img_w=2048, 
+                 device=torch.device("cuda"),
+                 ver='b2'):
         super(MyUNet, self).__init__()
-        self.base_model = EfficientNet.from_pretrained('efficientnet-b0')
+        
+        self.drop_rate = dropout_rate
+        self.base_model = effnet_dropout(drop_rate = self.drop_rate, ver=ver)
+        
+        #self.base_model = EfficientNet.from_pretrained('efficientnet-'+ver)
         
         self.batch_size = batch_size
         self.img_w = img_w
@@ -86,8 +110,11 @@ class MyUNet(nn.Module):
         self.conv3 = double_conv(512, 1024)
         
         self.mp = nn.MaxPool2d(2)
-        
-        self.up1 = up(1282 + 1024, 512)
+        if ver=='b0':
+            self.up1 = up(1282 + 1024, 512)
+        elif ver=='b2':
+            self.up1 = up(1410 + 1024, 512)
+
         self.up2 = up(512 + 512, 256)
         self.outc = nn.Conv2d(256, n_classes, 1)
 
@@ -131,7 +158,7 @@ def criterion(prediction, mask, regr, size_average=True):
     loss = mask_loss + regr_loss
     if not size_average:
         loss *= prediction.shape[0]
-    return loss
+    return loss, mask_loss, regr_loss
 
 def criter_objective(prediction, mask, regr, mask_gaus, 
                      w_mask = 0.1, w_regr = 0.9, gamma=2, 
@@ -156,7 +183,7 @@ def criter_objective(prediction, mask, regr, mask_gaus,
     regr_loss = regr_loss.mean(0)
     
     # Sum
-    loss = w_mask*mask_loss + w_regr*regr_loss
+    loss = w_mask * mask_loss + w_regr * regr_loss
     if not size_average:
         loss *= prediction.shape[0]
     return loss
@@ -169,12 +196,14 @@ class car_detector():
                  dev_dataset,
                  device = torch.device("cuda"), 
                  optimizer=optim.AdamW,
-                 lr=0.001,
+                 lr=0.01,
                  n_epoch = 12, 
                  batch_size = 4,
                  w_mask = 0.1,
-                 history=None
+                 history=None,
+                 PATH='../model/'
                 ):
+        self.PATH = PATH
         self.model = model
         self.device = device
         self.optimizer = optimizer(model.parameters(), lr=lr)
@@ -187,9 +216,12 @@ class car_detector():
         self.train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
         self.dev_loader = DataLoader(dataset=dev_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
         
-        self.exp_lr_scheduler = lr_scheduler.StepLR(self.optimizer, 
-                                                    step_size=max(n_epoch, 10) * len(self.train_loader) // 3,
-                                                    gamma=0.1)
+        #self.exp_lr_scheduler = lr_scheduler.StepLR(self.optimizer, 
+        #                                            step_size=max(n_epoch, 10) * len(self.train_loader) // 3,
+        #                                            gamma=0.1)
+        
+        self.exp_lr_scheduler = lr_scheduler.MultiStepLR(self.optimizer, milestones=[7,10,12,14,17,20], gamma=0.5)
+        
         if history is None:
             self.history = pd.DataFrame()
         else:
@@ -224,18 +256,21 @@ class car_detector():
                                     w_mask = w_mask, 
                                     w_regr = w_regr,
                                     device=device)
-            if history is not None:
-                history.loc[epoch + batch_idx / len(train_loader), 'train_loss'] = loss.data.cpu().numpy()
+            #if history is not None:
+            #    history.loc[epoch + batch_idx / len(train_loader), 'train_loss'] = loss.data.cpu().numpy()
         
             loss.backward()
         
-            optimizer.step()
-            exp_lr_scheduler.step()
+        optimizer.step()
+        optimizer.zero_grad()
+        exp_lr_scheduler.step()
     
         print('Train Epoch: {} \tLR: {:.6f}\tLoss: {:.6f}'.format(
             epoch,
             optimizer.state_dict()['param_groups'][0]['lr'],
             loss.data))
+        if history is not None:
+            history.loc[epoch,'train_loss'] = loss.data.cpu().numpy()
         
     def evaluate_model(self, epoch, history=None):
         
@@ -247,36 +282,82 @@ class car_detector():
         w_regr = 1.-w_mask
         
         model.eval()
-        loss = 0
+        total_loss = torch.tensor(0., requires_grad=False)
+        total_mask_loss = torch.tensor(0., requires_grad=False)
+        total_regr_loss = torch.tensor(0., requires_grad=False)
     
         with torch.no_grad():
-            for img_batch, mask_batch, regr_batch, _, _ in dev_loader:
+            for img_batch, mask_batch, regr_batch, _, _ in tqdm(dev_loader):
                 img_batch = img_batch.to(device)
                 mask_batch = mask_batch.to(device)
                 regr_batch = regr_batch.to(device)
             
                 output = model(img_batch)
-
-                loss += criterion(output, mask_batch, regr_batch, size_average=False).data
+                val_loss, mask_loss, regr_loss = criterion(output, 
+                                                           mask_batch, 
+                                                           regr_batch, 
+                                                           size_average=False)
+                total_loss += val_loss.data
+                total_mask_loss += mask_loss.data
+                total_regr_loss += regr_loss.data
     
-        loss /= len(dev_loader.dataset)
+        total_loss /= len(dev_loader.dataset)
+        total_mask_loss /= len(dev_loader.dataset)
+        total_regr_loss /= len(dev_loader.dataset)
     
         if history is not None:
-            history.loc[epoch, 'dev_loss'] = loss.cpu().numpy()
-    
-        print('Dev loss: {:.4f}'.format(loss))
+            history.loc[epoch, 'dev_loss'] = total_loss.cpu().numpy()
+            history.loc[epoch, 'dev_mask_loss'] = total_mask_loss.cpu().numpy()
+            history.loc[epoch, 'dev_regr_loss'] = total_regr_loss.cpu().numpy()
+        
+        best_val_loss = np.min(history['dev_loss'].dropna().values)
+        
+        history.loc[epoch, 'best_val_loss'] = best_val_loss
+        
+        #print('Dev loss: {:.4f}'.format(loss))
+        
+        print("\n=========================")
+        print(f"epoch={epoch}")
+        print(f"VAL LOSS: {total_loss:.2f}, \tBest Val Loss: {best_val_loss:.2f}")
+        print(f"mask_val_loss: {total_mask_loss:.2f}, \tregr_val_loss: {total_regr_loss:.2f}")
+        
+        
+        return total_loss, total_mask_loss, total_regr_loss
     
     def fit(self, start_epoch=0):
-
+        
+        if 'dev_loss' in self.history:
+            prev_val_loss = np.min(self.history['dev_loss'].dropna().values)
+        else:
+            prev_val_loss = 9999.
+        
+        not_better_times = 0
+        PATH = self.PATH
         for epoch in range(start_epoch, self.n_epoch+start_epoch):
+            
+            name='model_'+str(epoch)+'epoch.pth'
+
+            if not_better_times >= 3:
+                break
+                
             torch.cuda.empty_cache()
             gc.collect()
             self.train_model(epoch, self.history)
-            self.evaluate_model(epoch, self.history)
+            
+            new_total_loss, new_mask_loss, new_regr_loss = self.evaluate_model(epoch, self.history)
+            
+            if new_total_loss < prev_val_loss:
+                print('New best model obtained!')
+                self.save_model(name=name, PATH='../model/')
+                prev_val_loss = new_total_loss
+            else:
+                not_better_times += 1
+               
+            self.history.to_csv(PATH+name+'_history.csv')
+                
     
     def save_model(self, name='model.pth', PATH='../model/'):
         torch.save(self.model.state_dict(), PATH+name)
-        self.history.to_csv(PATH+name+'_history.csv')
         
     def view_train_loss(self):
         self.history['train_loss'].iloc[100:].plot()

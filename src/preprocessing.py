@@ -92,7 +92,7 @@ def _regr_preprocess(regr_dict, flip=False):
     return regr_dict
 
 
-def get_heatmap(p_x, p_y,wm,hm, sigma=0.5):
+def get_heatmap(p_x, p_y, wm, hm, sigma=0.5):
     X1 = np.linspace(1, wm, wm)
     Y1 = np.linspace(1, hm, hm)
     [X, Y] = np.meshgrid(X1, Y1)
@@ -104,7 +104,7 @@ def get_heatmap(p_x, p_y,wm,hm, sigma=0.5):
     heatmap = np.exp(-Exponent)
     return heatmap
 
-def preprocess_image(img, img_w=1600, img_h=500, flip=False):
+def preprocess_image(img, img_w=2048, img_h=512, flip=False):
     img = img[img.shape[0] // 2:]
     bg = np.ones_like(img) * img.mean(1, keepdims=True).astype(img.dtype)
     bg = bg[:, :img.shape[1] // 6]
@@ -114,7 +114,7 @@ def preprocess_image(img, img_w=1600, img_h=500, flip=False):
         img = img[:,::-1]
     return (img / 255).astype('float32')
 
-def get_mask_and_regr(img, labels, img_w=1600, img_h=500, model_scale=8, sigma=0.5, flip=False):
+def get_mask_and_regr(img, labels, img_w=2048, img_h=512, model_scale=8, sigma=0.5, flip=False):
     mask = np.zeros([img_h // model_scale, img_w // model_scale], dtype='float32')
     regr_names = ['x', 'y', 'z', 'yaw', 'pitch', 'roll']
     regr = np.zeros([img_h // model_scale, img_w // model_scale, 7], dtype='float32')
